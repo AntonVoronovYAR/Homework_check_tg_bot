@@ -7,8 +7,8 @@ from http import HTTPStatus
 from logging import StreamHandler
 from dotenv import load_dotenv
 import telegram
-from exceptions import TokenError, ApiYandexUnavailableError, \
-    ApiYandexOtherError, ParseStatusError, SendMessageError
+from exceptions import (ApiYandexUnavailableError,
+                        ApiYandexOtherError, SendMessageError)
 
 FORMAT: str = '%(asctime)s %(levelname)s %(message)s'
 
@@ -38,24 +38,20 @@ HOMEWORK_VERDICTS: dict = {
     'reviewing': 'Работа взята на проверку ревьюером.',
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
-HOMEWORK_STATUS: str = ''
-MESSAGE: str = ''
 
 
 def check_tokens() -> bool:
     """Проверка доступности переменных окружения."""
-    status = all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
-    return status
+    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
 
 
 def get_api_answer(timestamp) -> dict:
     """Запрос ответа API сервиса Практикум.Домашка."""
     try:
-        homework_status = requests.get(
-            ENDPOINT,
-            headers=HEADERS,
-            params={'from_date': timestamp}
-        )
+        homework_status = requests.get(**{
+            'url': ENDPOINT,
+            'headers': HEADERS,
+            'params': {'from_date': timestamp}})
         if homework_status.status_code != HTTPStatus.OK:
             logging.error(f'Эндпоинт {ENDPOINT} не доступен')
             raise ApiYandexUnavailableError
@@ -69,16 +65,17 @@ def check_response(response) -> list:
     """Проверка ответа API сервиса Практикум.Домашка.
     Проверка соответствия документации
     """
-    if isinstance(response, dict) and tuple(
-            response.keys()) == ('homeworks', 'current_date'):
+    if isinstance(response, dict):
+        if 'homeworks' not in response:
+            logging.error('В ответе нет ключа homeworks')
+            raise KeyError
         if not isinstance(response['homeworks'], list):
             logging.error('Ответ c домашними работами пришел не в виде списка')
             raise TypeError
-        elif response['homeworks']:
-            homework = response['homeworks'][0]
-            return homework
-        else:
+        elif not response['homeworks']:
             logging.debug('Ответ не содержит список домашних работ')
+        else:
+            return response['homeworks'][0]
     else:
         logging.error('Получен некорреткный ответ от API')
         raise TypeError
@@ -89,16 +86,20 @@ def parse_status(homework) -> str:
     Извлечение из ответа API статуса проверки работы.
     Формирование ответа для отправки в Telegram-чат студента
     """
-    try:
-        homework_name = homework['homework_name']
-        homework_status = homework['status']
-        verdict = HOMEWORK_VERDICTS[homework_status]
-        logging.debug('Получен корректный статус работы в ответе API')
-        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
-    except Exception:
-        logging.error('Неожиданный статус домашней работы,'
-                      ' обнаруженный в ответе API')
-        raise ParseStatusError
+    for key in ('homework_name', 'status'):
+        if key not in homework:
+            logger.error(f'Ключ {key} отсутсвует в ответе API')
+            raise KeyError()
+
+    homework_name = homework['homework_name']
+    homework_status = homework['status']
+
+    if homework_status not in HOMEWORK_VERDICTS:
+        logger.error('Получен некорректный статус домашней работы')
+        raise KeyError()
+
+    verdict = HOMEWORK_VERDICTS[homework_status]
+    return f'Изменился статус проверки работы "{homework_name}": {verdict}'
 
 
 def send_message(bot, message) -> None:
@@ -111,12 +112,6 @@ def send_message(bot, message) -> None:
         raise SendMessageError
 
 
-# Комментарий для ревьювера: Очень много времени потратил
-# на разработку алгоритма, когда повторный статус ошибки и статус
-# проверки домашней работы отправляется в телегу только один раз
-# не смог додуматься как решить внутри функции и через декоратор.
-# В итоге решил через глобальные переменные, но чувствую, что через декоратор
-# было бы самым правильным решением, дайте, пожалуйста, ОС
 def main() -> None:
     """
     Основная логика работы бота.
@@ -131,27 +126,27 @@ def main() -> None:
     if not check_tokens():
         logger.critical('Отсутствует одна или несколько'
                         'из переменных окружения')
-        raise TokenError
+        sys.exit()
 
+    old_message = ''
+    old_error_message = ''
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
     while True:
         try:
             response = get_api_answer(timestamp)
             homework = check_response(response)
-            global HOMEWORK_STATUS
-            if homework and HOMEWORK_STATUS != homework['status']:
-                HOMEWORK_STATUS = homework['status']
+            if homework:
                 message = parse_status(homework)
-                send_message(bot, message)
+                if old_message != message:
+                    send_message(bot, message)
+                    old_message = message
         except Exception as error:
-            if error.__class__.__name__ == TypeError:
-                break
-            global MESSAGE
-            message = f'Сбой в работе программы: {error.__class__.__name__}'
-            if MESSAGE != message:
-                send_message(bot, message)
-                MESSAGE = message
+            error_message = f'Сбой в работе программы: ' \
+                            f'{error.__class__.__name__}'
+            if old_error_message != error_message:
+                send_message(bot, error_message)
+                old_error_message = error_message
         time.sleep(RETRY_PERIOD)
 
 
